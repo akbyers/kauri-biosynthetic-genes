@@ -1,3 +1,7 @@
+##The code for clustering ASVs at 97% sequence similarity was provided by users on this github thread: https://github.com/benjjneb/dada2/issues/947. All credit goes to these users who contributed the code.
+
+##First step of this code is to merge ASVs from multiple sequencing runs
+##Second step of this code is to cluster ASVs at 97% sequence similarity
 ---
 title: "Merging_reads"
 author: "Alexa Byers"
