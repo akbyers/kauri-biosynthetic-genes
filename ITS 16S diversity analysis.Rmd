@@ -1,0 +1,686 @@
+---
+title: "16S/ITS diversity analysis"
+author: "Alexa Byers"
+date: "2024-03-26"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+###Analysis is split into the major main sections
+###Analysis has been performed separately on the ITS and 16S ASVs
+#1. Phyloseq import and data preprocessing
+#2. Alpha diversity analysis
+#3. Beta diversity analysis
+#4. Plotting taxonomic composition of dominant taxonomic groups
+#5. ANCOM-BC2 analysis
+
+#load libraries
+```{r}
+library(car)
+library(ggplot2)
+library(phyloseq)
+library(vegan)
+library(metagenomeSeq)
+library(metagMisc)
+library(tidyverse)
+library(ANCOMBC)
+library(Rmisc)
+library(reshape2)
+library(lme4)
+library(ggpubr)
+library(data.table)
+library(devtools)
+library(pairwiseAdonis)
+library(Biostrings)
+library(dplyr)
+library(ggordiplots)
+```
+
+###### ITS GENE REGIONS ######
+#1. Phyloseq import and data preprocessing
+```{r ITS data import}
+ITS_counts <- read.csv("~/ITS_ASVs_counts.csv")
+ITS_sample_data <- read.csv("~/ITS_sample_METADATA.csv")
+ITS_taxa <- read.csv("~/ITS_ASVs_taxa.csv")
+```
+```{r format data}
+rownames(ITS_counts) <- ITS_counts$ASV_ID
+ITS_counts <- ITS_counts[,-1]
+rownames(ITS_taxa) <- ITS_taxa$ASV_ID
+ITS_taxa <- ITS_taxa[,-1]
+rownames(ITS_sample_data) <- ITS_sample_data$SequenceID
+factors <- c(4:7)
+ITS_sample_data[,factors] <- lapply(ITS_sample_data[,factors] , factor)  #set as factors
+```
+```{r make ITS phyloseq object}
+ITS_OTU = otu_table(ITS_counts, taxa_are_rows = TRUE)
+ITS_sampleDat = sample_data(ITS_sample_data)
+ITS_tax_table <- tax_table(as.matrix(ITS_taxa))
+#make phyloseq oject
+ITS_ps = phyloseq(ITS_OTU, ITS_sampleDat, ITS_tax_table)
+```
+```{r filter taxa with < 10 reads}
+ITS_ps_filt = filter_taxa(ITS_ps, function(x) sum(x) > 10, TRUE)
+saveRDS(ITS_ps_filt, "~/ITS_ps_filt.rds")
+```
+```{r rarefy ps object}
+View(as.data.frame(sample_sums(ITS_ps_filt)))
+ITS_ps_rareAvg <- rarefy_even_depth(ITS_ps_filt, sample.size = 19200, replace = FALSE, trimOTUs = TRUE, rngseed = 71) #6713 taxa
+saveRDS(ITS_ps_rareAvg, "~/ITS_ps_rareAvg.rds")
+```
+#2. Alpha diversity analysis
+```{r calculate alpha diversity}
+ITS_richness <- specnumber(t(otu_table(ITS_ps_rareAvg)))
+ITS_shannondiv <- diversity(t(otu_table(ITS_ps_rareAvg)))
+
+ITS_alpha <- cbind(as.data.frame(ITS_richness), as.data.frame(ITS_shannondiv))
+ITS_alpha <- cbind(ITS_alpha, as.data.frame(ITS_ps_rareAvg@sam_data)) #add sample data
+```
+```{r plot alpha diversity: format data}
+ITS_alpha.m <- melt(ITS_alpha[c(1:3, 5,7,8)])
+ITS_alpha.SE <- summarySE(ITS_alpha.m, measurevar = "value", groupvars =c("Forest", "PTA_symptomatic","variable"))
+ITS_alpha.SE2 <- summarySE(ITS_alpha.m, measurevar = "value", groupvars =c("Forest", "variable"))
+levels(ITS_alpha.SE$variable) <- c("Chao1 richness", "Shannon diversity")
+levels(ITS_alpha.SE2$variable) <- c("Chao1 richness", "Shannon diversity")
+```
+```{r ITS alpha diversity plots}
+ITS_diversity_plot_1 <- ggplot(data=ITS_alpha.SE, aes(y=Forest, x=value, group=PTA_symptomatic, color=PTA_symptomatic)) +
+  geom_point(aes(), size=6)+
+  theme_bw(base_size = 15)+
+  xlab("")+
+  ylab("")+ 
+  theme(axis.text.x = element_text(face="bold"),
+  axis.text.y = element_text(face="bold"),
+  axis.title.x = element_text(face="bold"),
+  axis.title.y = element_text(face="bold"))+
+  geom_errorbar(aes(xmin=value-se, xmax=value+se), size=1, width=.2)+  
+    scale_color_manual(values = c("blue", "red"), labels=c("Non-symptomatic", "Symptomatic"))+
+  facet_wrap(~variable, scales = "free_x", nrow = 1, ncol = 2)+
+  labs(title = "a) Fungi", color="Disease expression")
+```
+#glmer tests on alpha diversity
+```{r run glmer tests using forest as main effect}
+ITS_shannon <- glmer(shannondiv_ITS ~ Forest + (1|PTA_symptomatic), family= Gamma(link = "log"), data = ITS_alpha)
+Anova(ITS_shannon)
+
+ITS_richness <- glmer(richness_ITS ~ Forest + (1|PTA_symptomatic), family= Gamma(link = "log"), data = ITS_alpha)
+Anova(ITS_richness)
+```
+```{r run glmer tests using disease expression as main effect}
+ITS_alpha_noPuk <- subset(ITS_alpha, Forest!="Puketi")#remove puketi forest for tests of PTA symptomology
+ITS_shannon2 <- glmer(shannondiv_ITS ~ PTA_symptomatic + (1|Forest), family= Gamma(link = "log"), data = ITS_alpha_noPuk)
+Anova(ITS_shannon2)
+
+ITS_richness2 <- glmer(richness_ITS ~ PTA_symptomatic + (1|Forest), family= Gamma(link = "log"), data = ITS_alpha_noPuk)
+Anova(ITS_richness2)
+```
+```{r pairwise wilcoxon tests}
+pairwise.wilcox.test(ITS_alpha$richness_ITS, ITS_alpha$Forest, p.adjust.method = "holm")
+pairwise.wilcox.test(ITS_alpha$shannondiv_ITS, ITS_alpha$Forest, p.adjust.method = "holm")
+```
+#3. Beta diversity analysis
+```{r distance matrix and NMDS}
+ps_rareAvg_ITS <- subset_samples(ps_rareAvg_ITS, Sample_ID != c("H10", "H14"))#remove H10 and H14 as they are huge outliers (as shown by ordination plots)
+ITS_BC <- phyloseq::distance(ITS_ps_rareAvg, "bray")
+ITS_NMDS <- metaMDS(as.matrix(ITS_BC), distance = "bray")
+```
+```{r ITS beta diversity PERMANOVA and pairwise adonis}
+ITS_filt_sampleDat <- as.matrix(ITS_ps_rareAvg@sam_data)
+ITS_filt_sampleDat <- as.data.frame(ITS_filt_sampleDat)
+
+adonis2(ITS_BC ~ ITS_filt_sampleDat$Forest) #permanova tests in vegan
+pairwise.adonis(ITS_BC, ITS_filt_sampleDat$Forest, sim.function = "vegdist", sim.method = "bray", p.adjust.m = "holm", perm = 999) #pairwise adonis tests
+```
+```{r plotting ordination by forest}
+ordiplot_ITS <- gg_ordiplot(ITS_nmds_forest, ITS_NMDS_sampleDat$Forest, scaling = 1, choices = c(1, 2), kind = c("sd"),
+    conf = 0.95, show.groups = "all", ellipse = TRUE, label = FALSE, hull = FALSE,
+    spiders = FALSE, plot = TRUE)
+ordiplot_ITS2 <- ordiplot_ITS$plot +  
+  scale_colour_manual(values=c("darkgreen","black", "blue", "orange", "purple")) +
+  guides(color=guide_legend("Forest"))+
+  geom_vline(xintercept = c(0), color = "black", linetype = 2) +
+  geom_hline(yintercept = c(0), color = "black", linetype = 2)+
+  theme_bw(base_size=15)
+```
+###removing puketi forest to test effects of pta symptomology
+```{r}
+ITS_ps_filt2 <- subset_samples(ITS_ps_rareAvg, Forest != "Puketi") #remove puketi
+ITS_ps_filt2 = filter_taxa(ITS_ps_filt2, function(x) sum(x) > 1, TRUE) #remove otus which now have a zero count
+ITS_ps_rareAvg2 <- rarefy_even_depth(ITS_ps_filt2, sample.size = 3900, replace = FALSE, trimOTUs = TRUE, rngseed = 71) #3924 taxa
+```
+```{r beta diversity on no puketi dataset}
+ITS_BC2 <- phyloseq::distance(ITS_ps_rareAvg2, "bray")
+ITS_NMDS2 <- metaMDS(as.matrix(ITS_BC2), distance = "bray")
+```
+```{r ITS beta diversity PERMANOVA and pairwise adonis}
+ITS_filt_sampleDat2 <- as.data.frame(ITS_ps_rareAvg2@sam_data)
+adonis2(ITS_BC2 ~ ITS_filt_sampleDat2$PTA_symptomatic)
+```
+```{r plotting ordination by dieback expression}
+ordiplot_ITS_PTA <- gg_ordiplot(ITS_nmds_PTA, ITS_sampleDat_PTA$PTA_symptomatic, scaling = 1, choices = c(1, 2), kind = c("sd"),
+    conf = 0.95, show.groups = "all", ellipse = TRUE, label = FALSE, hull = FALSE,
+    spiders = FALSE, plot = TRUE)
+ordiplot_ITS_PTA2 <- ordiplot_ITS_PTA$plot +  
+  scale_colour_manual(values=c("blue", "red")) +
+  guides(color=guide_legend("Dieback expression"))+
+  geom_vline(xintercept = c(0), color = "black", linetype = 2) +
+  geom_hline(yintercept = c(0), color = "black", linetype = 2)+
+  theme_bw(base_size=15)
+```
+#4. Plotting most abundant ITS gene regions
+```{r agglomerate taxa levels and filter low abundance taxa}
+#transform to relative abundance
+ITS_RA <- transform_sample_counts(ps_ITS, function(x) x / sum(x)*100 )
+
+phylumGlom_ITS <- tax_glom(ITS_RA, taxrank = "Phylum", NArm = FALSE)
+phylumGlom_ITS <- filter_taxa(phylumGlom_ITS, function(x) mean(x) > 1, TRUE)
+
+classGlom_ITS <- tax_glom(ITS_RA, taxrank = "Class", NArm = FALSE)
+classGlom_ITS <- filter_taxa(classGlom_ITS, function(x) mean(x) > 1, TRUE)
+
+orderGlom_ITS <- tax_glom(ITS_RA, taxrank = "Order", NArm = FALSE)
+orderGlom_ITS <- filter_taxa(orderGlom_ITS, function(x) mean(x) > 1, TRUE)
+
+familyGlom_ITS <- tax_glom(ITS_RA, taxrank = "Family", NArm = FALSE)
+familyGlom_ITS <- filter_taxa(familyGlom_ITS, function(x) mean(x) > 1, TRUE)
+
+genusGlom_ITS <- tax_glom(ITS_RA, taxrank = "Genus", NArm = FALSE)
+genusGlom_ITS <- filter_taxa(genusGlom_ITS, function(x) mean(x) > 0.5, TRUE)
+```
+```{r summarise by mean abundance}
+phylumGlom_ITS.df <- psmelt(phylumGlom_ITS)
+phylumGlom_ITS.df$Phylum = gsub(pattern = "p__*", replacement = "", x = phylumGlom_ITS.df$Phylum)
+phylumGlom_ITS.df$Phylum <- as.factor(phylumGlom_ITS.df$Phylum)
+
+phylumGlom_ITS.sum <- phylumGlom_ITS.df %>%
+  group_by(Forest, Phylum) %>%
+  summarize(mean_abund = mean(Abundance, na.rm=TRUE)) 
+```
+```{r plot ITS phyla}
+colourCount = length(unique(phylumGlom_ITS.sum$Phylum))
+getPalette = colorRampPalette(brewer.pal(5, "Set1"))
+
+ITS_phyla_plot <- ggplot(phylumGlom_ITS.sum, aes(fill=reorder(Phylum, +mean_abund), y=mean_abund, x=Forest)) + 
+    geom_bar(position="stack", stat="identity")+
+  theme_bw(base_size = 15)+ 
+  theme(axis.text.x = element_text(face="bold"),
+  axis.text.y = element_text(face="bold"),
+  axis.title.x = element_text(face="bold"),
+  axis.title.y = element_text(face="bold"))+
+  xlab("Forest")+
+  ylab("Relative abundance (%)")+
+  geom_col(color = "black")+ 
+  guides(fill=guide_legend(title="Phylum"))+ 
+  scale_fill_manual(values = getPalette(colourCount))
+```
+```{r plot ITS classes}
+classGlom_ITS.df <- psmelt(classGlom_ITS)
+classGlom_ITS.df$Class = gsub(pattern = "c__*", replacement = "", x = classGlom_ITS.df$Class)
+
+classGlom_ITS.sum <- classGlom_ITS.df %>%
+  group_by(Forest, Class) %>%
+  summarize(mean_abund = mean(Abundance, na.rm=FALSE)) 
+
+colourCount = length(unique(classGlom_ITS.sum$Class))
+getPalette = colorRampPalette(brewer.pal(9, "Set1"))
+
+ITS_class_plot <- ggplot(classGlom_ITS.sum, aes(fill=reorder(Class, +mean_abund), y=mean_abund, x=Forest)) + 
+    geom_bar(position="stack", stat="identity")+
+  theme_bw(base_size = 15)+ 
+  theme(axis.text.x = element_text(face="bold"),
+  axis.text.y = element_text(face="bold"),
+  axis.title.x = element_text(face="bold"),
+  axis.title.y = element_text(face="bold"))+
+  xlab("Forest")+
+  ylab("Relative abundance (%)")+
+  geom_col(color = "black")+ 
+  guides(fill=guide_legend(title="Class"))+ 
+  scale_fill_manual(values = getPalette(colourCount))
+```
+```{r plot ITS orders}
+orderGlom_ITS.df <- psmelt(orderGlom_ITS)
+orderGlom_ITS.df$Order = gsub(pattern = "o__*", replacement = "", x = orderGlom_ITS.df$Order)
+
+orderGlom_ITS.sum <- orderGlom_ITS.df %>%
+  group_by(Forest, Order) %>%
+  summarize(mean_abund = mean(Abundance, na.rm=FALSE))
+
+colourCount = length(unique(orderGlom_ITS.sum$Order))
+mycolors = c(brewer.pal(name="Dark2", n = 8), brewer.pal(name="Paired", n = 6))
+
+ITS_order_plot <- ggplot(orderGlom_ITS.sum, aes(fill=reorder(Order, +mean_abund), y=mean_abund, x=Forest)) + 
+    geom_bar(position="stack", stat="identity")+
+  theme_bw(base_size = 15)+ 
+  theme(axis.text.x = element_text(face="bold"),
+  axis.text.y = element_text(face="bold"),
+  axis.title.x = element_text(face="bold"),
+  axis.title.y = element_text(face="bold"))+
+  xlab("Forest")+
+  ylab("Relative abundance (%)")+
+  geom_col(color = "black")+ 
+  guides(fill=guide_legend(title="Order"))+ 
+  scale_fill_manual(values = mycolors)
+```
+```{r plot ITS families}
+familyGlom_ITS.df <- psmelt(familyGlom_ITS)
+familyGlom_ITS.df$Family = gsub(pattern = "f__*", replacement = "f_", x = familyGlom_ITS.df$Family)
+familyGlom_ITS.df$Order = gsub(pattern = "o__*", replacement = "o_", x = familyGlom_ITS.df$Order)
+familyGlom_ITS.df$Family_ID <- paste(familyGlom_ITS.df$Order, familyGlom_ITS.df$Family, sep=";")
+
+familyGlom_ITS.sum <- familyGlom_ITS.df %>%
+  group_by(Forest, Family_ID) %>%
+  summarize(mean_abund = mean(Abundance, na.rm=FALSE))
+
+#remove NA;NA taxa
+familyGlom_ITS.sum <- subset(familyGlom_ITS.sum, Family_ID !="NA;NA")
+
+colourCount = length(unique(familyGlom_ITS.sum$Family_ID))
+mycolors = c(brewer.pal(name="Dark2", n = 8), brewer.pal(name="Paired", n = 4), brewer.pal(name="Accent", n = 8))
+
+ITS_family_plot <- ggplot(familyGlom_ITS.sum, aes(fill=reorder(Family_ID, +mean_abund), y=mean_abund, x=Forest)) + 
+    geom_bar(position="stack", stat="identity")+
+  theme_bw(base_size = 15)+ 
+  theme(axis.text.x = element_text(face="bold"),
+  axis.text.y = element_text(face="bold"),
+  axis.title.x = element_text(face="bold"),
+  axis.title.y = element_text(face="bold"))+
+  xlab("")+
+  ylab("Relative abundance (%)")+
+  geom_col(color = "black")+ 
+  guides(fill=guide_legend(title="Family"))+ 
+  scale_fill_manual(values = mycolors)
+```
+```{r plot ITS genera}
+genusGlom_ITS.df <- psmelt(genusGlom_ITS)
+genusGlom_ITS.df$Genus = gsub(pattern = "g__*", replacement = "g_", x = genusGlom_ITS.df$Genus)
+genusGlom_ITS.df$Family = gsub(pattern = "f__*", replacement = "f_", x = genusGlom_ITS.df$Family)
+genusGlom_ITS.df$Genus <- genusGlom_ITS.df$Genus%>% replace_na('g_NA')
+
+genusGlom_ITS.df$Genus_ID <- paste(genusGlom_ITS.df$Family, genusGlom_ITS.df$Genus, sep=";")
+
+genusGlom_ITS.sum <- genusGlom_ITS.df %>%
+  group_by(Forest, Genus_ID) %>%
+  summarize(mean_abund = mean(Abundance, na.rm=FALSE))
+
+#remove NA;NA taxa
+genusGlom_ITS.sum <- subset(genusGlom_ITS.sum, Genus_ID !="NA;g_NA")
+
+colourCount = length(unique(genusGlom_ITS.sum$Genus_ID))
+mycolors = c(brewer.pal(name="Dark2", n = 8), brewer.pal(name="Paired", n = 10), brewer.pal(name="Accent", n = 8))
+
+ITS_genus_plot <- ggplot(genusGlom_ITS.sum, aes(fill=reorder(Genus_ID, +mean_abund), y=mean_abund, x=Forest)) + 
+    geom_bar(position="stack", stat="identity")+
+  theme_bw(base_size = 15)+ 
+  theme(axis.text.x = element_text(face="bold"),
+  axis.text.y = element_text(face="bold"),
+  axis.title.x = element_text(face="bold"),
+  axis.title.y = element_text(face="bold"))+
+  xlab("")+
+  ylab("Relative abundance (%)")+
+  geom_col(color = "black")+ 
+  guides(fill=guide_legend(title="Genus", ncol = 1))+ 
+  scale_fill_manual(values = mycolors)
+```
+#5. ANCOM-BC2 analysis
+```{r format phyloseq objects and filter low abundance taxa}
+ps_ITS_genus <- tax_glom(ps_ITS, taxrank = "Genus", NArm = FALSE) #merge to genus level
+ps_ITS_genus <- subset_samples(ps_ITS_genus, Sample_ID != c("H10", "H14"))#remove H10 and H14 as they are huge outliers
+
+ps_ITS2 = filter_taxa(ps_ITS_genus, function(x) sum(x) > 100, TRUE) #1856 taxa
+ITS_DA_PTA <- subset_samples(ps_ITS_genus, Forest != "Puketi") #remove puketi- for dieback expression model
+ITS_DA_PTA = filter_taxa(ps_ITS_genus, function(x) sum(x) > 100, TRUE) #920 taxa
+```
+```{r ancombc model by Forest}
+ITS_ancombc_Forest <- ancombc2(ps_ITS2, fix_formula = "Forest", p_adj_method = "holm",  prv_cut = 0.01, lib_cut = 0,  s0_perc = 0.05, 
+  group = "Forest", struc_zero = TRUE, neg_lb = FALSE,  alpha = 0.05, n_cl = 1, verbose = TRUE, global = TRUE, pairwise = TRUE,
+  iter_control= list(tol= 0.01, max_iter= 20, verbose= FALSE), em_control= list(tol= 1e-05, max_iter= 100), mdfdr_control= list(fwer_ctrl_method= "holm", B= 100))
+```
+```{r ancombc model by PTA expression}
+ITS_ancombc_PTA <- ancombc2(ITS_DA_PTA, fix_formula = "PTA_symptomatic", p_adj_method = "holm", prv_cut = 0.01, lib_cut = 0, s0_perc = 0.05, 
+  group = "PTA_symptomatic",  struc_zero = TRUE, neg_lb = FALSE, alpha = 0.05, n_cl = 1, verbose = TRUE, global = FALSE, pairwise = FALSE, 
+  iter_control = list(tol = 0.01, max_iter = 20, verbose = FALSE), em_control = list(tol = 1e-05, max_iter = 100))
+```
+```{r filter non-significant ANCOM-BC2 results}
+ITS_ancom_Forest_global <- subset(ITS_ancombc_Forest$res_global, q_val < 0.05) #shows ITS ASVs with significant differential abundance
+ITS_ancombc_PTA_global <- subset(ITS_ancombc_PTA$res, q_PTA_symptomaticTRUE < 0.05)
+```
+#log fold change plots BGC regions between non-symp and symp
+```{r}
+PTA_LFC_ITS <- ggplot(data=ITS_ancombc_PTA_global, aes(y=reorder(taxon, -W_PTA_symptomaticTRUE), x=W_PTA_symptomaticTRUE)) + #using W value
+  geom_point(size=5, color=ITS_ancombc_PTA_global$colour)+
+  theme_bw(base_size = 12)+
+  xlab("ANCOM BC2 W-value\nNon-symptomatic vs Symptomatic")+
+  ylab("")+ 
+  theme(axis.text.x = element_text(face="bold"),
+  axis.text.y = element_text(face="bold"))+ 
+  labs(fill="Relative abundance (%)")+ 
+  geom_vline(xintercept=0, color="black", linewidth=1)+
+  scale_x_continuous(limits = c(-25, 30), breaks = c(-25, -20, -15, -10, -5, 0, 5, 10, 15, 20, 25,30))+
+  labs(title = "a) ITS ASVs")+
+  theme(plot.title = element_text(size=17))
+```
+
+##### x16S GENE REGIONS ######
+#1. Phyloseq import and data preprocessing
+```{r x16S data import}
+x16S_counts <- read.csv("~/x16S_ASVs_counts.csv")
+x16S_sample_data <- read.csv("~/x16S_sample_METADATA.csv")
+x16S_taxa <- read.csv("~/x16S_ASVs_taxa.csv")
+```
+```{r format data}
+rownames(x16S_counts) <- x16S_counts$ASV_ID
+x16S_counts <- x16S_counts[,-1]
+rownames(x16S_taxa) <- x16S_taxa$ASV_ID
+x16S_taxa <- x16S_taxa[,-1]
+rownames(x16S_sample_data) <- x16S_sample_data$SequenceID
+factors <- c(4:7)
+x16S_sample_data[,factors] <- lapply(x16S_sample_data[,factors] , factor)  #set as factors
+```
+```{r make x16S phyloseq object}
+x16S_OTU = otu_table(x16S_counts, taxa_are_rows = TRUE)
+x16S_sampleDat = sample_data(x16S_sample_data)
+x16S_tax_table <- tax_table(as.matrix(x16S_taxa))
+#make phyloseq oject
+x16S_ps = phyloseq(x16S_OTU, x16S_sampleDat, x16S_tax_table)
+```
+```{r filter taxa with < 10 reads}
+x16S_ps_filt = filter_taxa(x16S_ps, function(x) sum(x) > 10, TRUE)
+saveRDS(x16S_ps_filt, "~/x16S_ps_filt.rds")
+```
+```{r rarefy ps object}
+View(as.data.frame(sample_sums(x16S_ps_filt)))
+x16S_ps_rareAvg <- rarefy_even_depth(x16S_ps_filt, sample.size = 15000, replace = FALSE, trimOTUs = TRUE, rngseed = 71) #6713 taxa
+saveRDS(x16S_ps_rareAvg, "~/x16S_ps_rareAvg.rds")
+```
+#2. Alpha diversity analysis
+```{r calculate alpha diversity}
+x16S_richness <- specnumber(t(otu_table(x16S_ps_rareAvg)))
+x16S_shannondiv <- diversity(t(otu_table(x16S_ps_rareAvg)))
+
+x16S_alpha <- cbind(as.data.frame(x16S_richness), as.data.frame(x16S_shannondiv))
+x16S_alpha <- cbind(x16S_alpha, as.data.frame(x16S_ps_rareAvg@sam_data)) #add sample data
+```
+```{r plot alpha diversity: format data}
+x16S_alpha.m <- melt(x16S_alpha[c(1:3, 5,7,8)])
+x16S_alpha.SE <- summarySE(x16S_alpha.m, measurevar = "value", groupvars =c("Forest", "PTA_symptomatic","variable"))
+x16S_alpha.SE2 <- summarySE(x16S_alpha.m, measurevar = "value", groupvars =c("Forest", "variable"))
+levels(x16S_alpha.SE$variable) <- c("Chao1 richness", "Shannon diversity")
+levels(x16S_alpha.SE2$variable) <- c("Chao1 richness", "Shannon diversity")
+```
+```{r x16S alpha diversity plots}
+x16S_diversity_plot_1 <- ggplot(data=x16S_alpha.SE, aes(y=Forest, x=value, group=PTA_symptomatic, color=PTA_symptomatic)) +
+  geom_point(aes(), size=6)+
+  theme_bw(base_size = 15)+
+  xlab("")+
+  ylab("")+ 
+  theme(axis.text.x = element_text(face="bold"),
+  axis.text.y = element_text(face="bold"),
+  axis.title.x = element_text(face="bold"),
+  axis.title.y = element_text(face="bold"))+
+  geom_errorbar(aes(xmin=value-se, xmax=value+se), size=1, width=.2)+  
+    scale_color_manual(values = c("blue", "red"), labels=c("Non-symptomatic", "Symptomatic"))+
+  facet_wrap(~variable, scales = "free_x", nrow = 1, ncol = 2)+
+  labs(title = "b) Bacteria", color="Disease expression")
+```
+#glmer tests on alpha diversity
+```{r run glmer tests using forest as main effect}
+x16S_shannon <- glmer(shannondiv_16S ~ Forest + (1|PTA_symptomatic), family= Gamma(link = "log"), data = x16S_alpha)
+Anova(x16S_shannon)
+
+x16S_richness <- glmer(richness_16S ~ Forest + (1|PTA_symptomatic), family= Gamma(link = "log"), data = x16S_alpha)
+Anova(x16S_richness)
+```
+```{r run glmer tests using disease expression as main effect}
+x16S_alpha_noPuk <- subset(x16S_alpha, Forest!="Puketi")#remove puketi forest for tests of PTA symptomology
+x16S_shannon2 <- glmer(shannondiv_16S ~ PTA_symptomatic + (1|Forest), family= Gamma(link = "log"), data = x16S_alpha_noPuk)
+Anova(x16S_shannon2)
+
+x16S_richness2 <- glmer(richness_16S ~ PTA_symptomatic + (1|Forest), family= Gamma(link = "log"), data = x16S_alpha_noPuk)
+Anova(x16S_richness2)
+```
+```{r pairwise wilcoxon tests}
+pairwise.wilcox.test(x16S_alpha$richness_16S, x16S_alpha$Forest, p.adjust.method = "holm")
+pairwise.wilcox.test(x16S_alpha$shannondiv_16S, x16S_alpha$Forest, p.adjust.method = "holm")
+```
+#3. Beta diversity analysis
+```{r distance matrix and NMDS}
+x16S_BC <- phyloseq::distance(x16S_ps_rareAvg, "bray")
+x16S_NMDS <- metaMDS(as.matrix(x16S_BC), distance = "bray")
+```
+```{r x16S beta diversity PERMANOVA and pairwise adonis}
+x16S_filt_sampleDat <- as.matrix(x16S_ps_rareAvg@sam_data)
+x16S_filt_sampleDat <- as.data.frame(x16S_filt_sampleDat)
+
+adonis2(x16S_BC ~ x16S_filt_sampleDat$Forest) #permanova tests in vegan
+pairwise.adonis(x16S_BC, x16S_filt_sampleDat$Forest, sim.function = "vegdist", sim.method = "bray", p.adjust.m = "holm", perm = 999) #pairwise adonis tests
+```
+```{r plotting ordination by forest}
+ordiplot_x16S <- gg_ordiplot(x16S_nmds_forest, x16S_NMDS_sampleDat$Forest, scaling = 1, choices = c(1, 2), kind = c("sd"),
+    conf = 0.95, show.groups = "all", ellipse = TRUE, label = FALSE, hull = FALSE,
+    spiders = FALSE, plot = TRUE)
+ordiplot_x16S2 <- ordiplot_x16S$plot +  
+  scale_colour_manual(values=c("darkgreen","black", "blue", "orange", "purple")) +
+  guides(color=guide_legend("Forest"))+
+  geom_vline(xintercept = c(0), color = "black", linetype = 2) +
+  geom_hline(yintercept = c(0), color = "black", linetype = 2)+
+  theme_bw(base_size=15)
+```
+###removing puketi forest to test effects of pta symptomology
+```{r}
+x16S_ps_filt2 <- subset_samples(x16S_ps_rareAvg, Forest != "Puketi") #remove puketi
+x16S_ps_filt2 = filter_taxa(x16S_ps_filt2, function(x) sum(x) > 1, TRUE) #remove otus which now have a zero count
+x16S_ps_rareAvg2 <- rarefy_even_depth(x16S_ps_filt2, sample.size = 3900, replace = FALSE, trimOTUs = TRUE, rngseed = 71) #3924 taxa
+```
+```{r beta diversity on no puketi dataset}
+x16S_BC2 <- phyloseq::distance(x16S_ps_rareAvg2, "bray")
+x16S_NMDS2 <- metaMDS(as.matrix(x16S_BC2), distance = "bray")
+```
+```{r x16S beta diversity PERMANOVA and pairwise adonis}
+x16S_filt_sampleDat2 <- as.data.frame(x16S_ps_rareAvg2@sam_data)
+adonis2(x16S_BC2 ~ x16S_filt_sampleDat2$PTA_symptomatic)
+```
+```{r plotting ordination by dieback expression}
+ordiplot_x16S_PTA <- gg_ordiplot(x16S_nmds_PTA, x16S_sampleDat_PTA$PTA_symptomatic, scaling = 1, choices = c(1, 2), kind = c("sd"),
+    conf = 0.95, show.groups = "all", ellipse = TRUE, label = FALSE, hull = FALSE,
+    spiders = FALSE, plot = TRUE)
+ordiplot_x16S_PTA2 <- ordiplot_x16S_PTA$plot +  
+  scale_colour_manual(values=c("blue", "red")) +
+  guides(color=guide_legend("Dieback expression"))+
+  geom_vline(xintercept = c(0), color = "black", linetype = 2) +
+  geom_hline(yintercept = c(0), color = "black", linetype = 2)+
+  theme_bw(base_size=15)
+```
+#4. Plotting most abundant bacterial taxa
+```{r agglomerate taxa levels and filter low abundance taxa}
+#transform to relative abundance
+x16S_RA <- transform_sample_counts(ps_16S, function(x) x / sum(x)*100 )
+
+phylumGlom_16S <- tax_glom(x16S_RA, taxrank = "Phylum", NArm = FALSE)
+phylumGlom_16S2 <- filter_taxa(phylumGlom_16S, function(x) mean(x) > 1, TRUE)
+
+classGlom_16S <- tax_glom(x16S_RA, taxrank = "Class", NArm = FALSE)
+classGlom_16S2 <- filter_taxa(classGlom_16S, function(x) mean(x) > 1, TRUE)
+
+orderGlom_16S <- tax_glom(x16S_RA, taxrank = "Order", NArm = FALSE)
+orderGlom_16S2 <- filter_taxa(orderGlom_16S, function(x) mean(x) > 1, TRUE)
+
+familyGlom_16S <- tax_glom(x16S_RA, taxrank = "Family", NArm = FALSE)
+familyGlom_16S2 <- filter_taxa(familyGlom_16S, function(x) mean(x) > 1, TRUE)
+
+genusGlom_16S <- tax_glom(x16S_RA, taxrank = "Genus", NArm = FALSE)
+genusGlom_16S2 <- filter_taxa(genusGlom_16S, function(x) mean(x) > 0.5, TRUE)
+```
+```{r plot 16S phyla}
+phylumGlom_16S.df <- psmelt(phylumGlom_16S2)
+
+phylumGlom_16S.sum <- phylumGlom_16S.df %>%
+  group_by(Forest, Phylum) %>%
+  summarize(mean_abund = mean(Abundance, na.rm=FALSE)) 
+
+colourCount = length(unique(phylumGlom_16S.sum$Phylum))
+getPalette = colorRampPalette(brewer.pal(6, "Set1"))
+
+x16S_phyla_plot <- ggplot(phylumGlom_16S.sum, aes(fill=reorder(Phylum, +mean_abund), y=mean_abund, x=Forest)) + 
+    geom_bar(position="stack", stat="identity")+
+  theme_bw(base_size = 15)+ 
+  theme(axis.text.x = element_text(face="bold"),
+  axis.text.y = element_text(face="bold"),
+  axis.title.x = element_text(face="bold"),
+  axis.title.y = element_text(face="bold"))+
+  xlab("Forest")+
+  ylab("Relative abundance (%)")+
+  geom_col(color = "black")+ 
+  guides(fill=guide_legend(title="Phylum"))+ 
+  scale_fill_manual(values = getPalette(colourCount))
+```
+```{r plot 16S classes}
+classGlom_16S.df <- psmelt(classGlom_16S2)
+
+classGlom_16S.sum <- classGlom_16S.df %>%
+  group_by(Forest, Class) %>%
+  summarize(mean_abund = mean(Abundance, na.rm=FALSE))
+
+colourCount = length(unique(classGlom_16S.sum$Class))
+mycolors = c(brewer.pal(name="Dark2", n = 8), brewer.pal(name="Paired", n = 7))
+
+x16S_class_plot <- ggplot(classGlom_16S.sum, aes(fill=reorder(Class, +mean_abund), y=mean_abund, x=Forest)) + 
+    geom_bar(position="stack", stat="identity")+
+  theme_bw(base_size = 15)+ 
+  theme(axis.text.x = element_text(face="bold"),
+  axis.text.y = element_text(face="bold"),
+  axis.title.x = element_text(face="bold"),
+  axis.title.y = element_text(face="bold"))+
+  xlab("Forest")+
+  ylab("Relative abundance (%)")+
+  geom_col(color = "black")+ 
+  guides(fill=guide_legend(title="Class", ncol = 1))+ 
+  scale_fill_manual(values = mycolors)
+```
+```{r plot 16S orders}
+orderGlom_16S.df <- psmelt(orderGlom_16S2)
+
+orderGlom_16S.sum <- orderGlom_16S.df %>%
+  group_by(Forest, Order) %>%
+  summarize(mean_abund = mean(Abundance, na.rm=FALSE))
+
+orderGlom_16S.sum$Order <- as.factor(orderGlom_16S.sum$Order)
+levels(orderGlom_16S.sum$Order) <- c("Acidimicrobiales",  "Acidobacterium",  "Burkholderiales",  "Caulobacterales", "Chitinophagales",  "Clostridiales",  "Enterobacterales",  "Gaiellales", "Gammaproteobacteria inc. sed.", "Acidobacteria_Gp1",  "Acidobacteria_Gp2",  "Acidobacteria_Gp3",                        "Granulicella",  "Micropepsales",  "Mycobacteriales",  "Myxococcales", "Rhizobiales",  "Rhodospirillales",  "Solirubrobacterales",  "Streptosporangiales")
+
+colourCount = length(unique(orderGlom_16S.sum$Order))
+mycolors2 = c(brewer.pal(name="Accent", n = 8), brewer.pal(name="Dark2", n = 8), brewer.pal(name="Paired", n = 5))
+
+x16S_order_plot <- ggplot(orderGlom_16S.sum, aes(fill=reorder(Order, +mean_abund), y=mean_abund, x=Forest)) + 
+    geom_bar(position="stack", stat="identity")+
+  theme_bw(base_size = 15)+ 
+  theme(axis.text.x = element_text(face="bold"),
+  axis.text.y = element_text(face="bold"),
+  axis.title.x = element_text(face="bold"),
+  axis.title.y = element_text(face="bold"))+
+  xlab("Forest")+
+  ylab("Relative abundance (%)")+
+  geom_col(color = "black")+ 
+  guides(fill=guide_legend(title="Order", ncol = 1))+ 
+  scale_fill_manual(values = mycolors2)
+```
+```{r plot 16S families}
+familyGlom_16S.df <- psmelt(familyGlom_16S2)
+
+familyGlom_16S.sum <- familyGlom_16S.df %>%
+  group_by(Forest, Family) %>%
+  summarize(mean_abund = mean(Abundance, na.rm=FALSE)) 
+
+colourCount = length(unique(familyGlom_16S.sum$Family))
+mycolors2 = c(brewer.pal(name="Accent", n = 7), brewer.pal(name="Dark2", n = 7), brewer.pal(name="Paired", n = 7))
+
+x16S_family_plot <- ggplot(familyGlom_16S.sum, aes(fill=reorder(Family, +mean_abund), y=mean_abund, x=Forest)) + 
+    geom_bar(position="stack", stat="identity")+
+  theme_bw(base_size = 15)+ 
+  theme(axis.text.x = element_text(face="bold"),
+  axis.text.y = element_text(face="bold"),
+  axis.title.x = element_text(face="bold"),
+  axis.title.y = element_text(face="bold"))+
+  xlab("")+
+  ylab("Relative abundance (%)")+
+  geom_col(color = "black")+ 
+  guides(fill=guide_legend(title="Family", ncol = 1))+ 
+  scale_fill_manual(values = mycolors2)
+```
+```{r plot 16S genera}
+genusGlom_16S.df <- psmelt(genusGlom_16S2)
+
+genusGlom_16S.df$Genus <- str_replace_all(genusGlom_16S.df$Genus, "(\\b\\w)", 'g_\\1')
+genusGlom_16S.df$Family <- str_replace_all(genusGlom_16S.df$Family, "(\\b\\w)", 'f_\\1')
+genusGlom_16S.df$Genus <- genusGlom_16S.df$Genus %>% replace_na('g_NA')
+
+genusGlom_16S.df$Genus_ID <- paste(genusGlom_16S.df$Family, genusGlom_16S.df$Genus, sep=";")
+
+genusGlom_16S.sum <- genusGlom_16S.df %>%
+  group_by(Forest, Genus_ID) %>%
+  summarize(mean_abund = mean(Abundance, na.rm=FALSE))
+
+genusGlom_16S.sum <- subset(genusGlom_16S.sum, Genus_ID !="NA;g_NA")
+
+colourCount = length(unique(genusGlom_16S.sum$Genus_ID))
+mycolors2 = c(brewer.pal(name="Accent", n = 7), brewer.pal(name="Dark2", n = 7), brewer.pal(name="Paired", n = 7))
+
+x16S_genus_plot <- ggplot(genusGlom_16S.sum, aes(fill=reorder(Genus_ID, +mean_abund), y=mean_abund, x=Forest)) + 
+    geom_bar(position="stack", stat="identity")+
+  theme_bw(base_size = 15)+ 
+  theme(axis.text.x = element_text(face="bold"),
+  axis.text.y = element_text(face="bold"),
+  axis.title.x = element_text(face="bold"),
+  axis.title.y = element_text(face="bold"))+
+  xlab("")+
+  ylab("Relative abundance (%)")+
+  geom_col(color = "black")+ 
+  guides(fill=guide_legend(title="Genus", ncol = 1))+ 
+  scale_fill_manual(values = mycolors2)
+```
+
+#5. ANCOM-BC2 analysis
+```{r format phyloseq objects and filter low abundance taxa}
+ps_16S_genus <- tax_glom(ps_16S, taxrank = "Genus", NArm = FALSE) #merge to genus level
+ps_x16S2 = filter_taxa(ps_x16S, function(x) sum(x) > 100, TRUE) #1856 taxa
+x16S_DA_PTA <- subset_samples(ps_x16S, Forest != "Puketi") #remove puketi- for dieback expression model
+x16S_DA_PTA = filter_taxa(x16S_DA_PTA, function(x) sum(x) > 100, TRUE) #920 taxa
+```
+```{r ancombc model by Forest}
+x16S_ancombc_Forest <- ancombc2(ps_x16S2, fix_formula = "Forest", p_adj_method = "holm", prv_cut = 0.01, lib_cut = 0, s0_perc = 0.05,
+  group = "Forest", struc_zero = TRUE, neg_lb = FALSE, alpha = 0.05, n_cl = 1, verbose = TRUE, global = TRUE, pairwise = TRUE, 
+  iter_control = list(tol = 0.01, max_iter = 20, verbose = FALSE), em_control = list(tol = 1e-05, max_iter = 100),
+  mdfdr_control = list(fwer_ctrl_method = "holm", B = 100))
+```
+```{r filter non-significant ANCOM-BC2 results}
+x16S_ancom_Forest_global <- subset(x16S_ancombc_Forest$res_global, q_val < 0.05) #shows x16S ASVs with significant differential abundance
+x16S_ancombc_PTA_global <- subset(x16S_ancombc_PTA$res, q_PTA_symptomaticTRUE < 0.05)
+```
+```{r ancombc model by PTA expression}
+x16S_ancombc_PTA <- ancombc2(x16S_DA_PTA, fix_formula = "PTA_symptomatic", p_adj_method = "holm", prv_cut = 0.01,
+  lib_cut = 0, s0_perc = 0.05, group = "PTA_symptomatic", struc_zero = TRUE, neg_lb = FALSE, alpha = 0.05, n_cl = 1,
+  verbose = TRUE, global = FALSE, pairwise = FALSE, iter_control = list(tol = 0.01, max_iter = 20, verbose = FALSE), em_control = list(tol = 1e-05, max_iter = 100))
+```
+#log fold change plots BGC regions between non-symp and symp
+```{r}
+PTA_LFC_x16S <- ggplot(data=x16S_ancombc_PTA_global, aes(y=reorder(taxon, -W_PTA_symptomaticTRUE), x=W_PTA_symptomaticTRUE)) + #using W value
+  geom_point(size=5, color=x16S_ancombc_PTA_global$colour)+
+  theme_bw(base_size = 12)+
+  xlab("ANCOM BC2 W-value\nNon-symptomatic vs Symptomatic")+
+  ylab("")+ 
+  theme(axis.text.x = element_text(face="bold"),
+  axis.text.y = element_text(face="bold"))+ 
+  labs(fill="Relative abundance (%)")+ 
+  geom_vline(xintercept=0, color="black", linewidth=1)+
+  scale_x_continuous(limits = c(-25, 30), breaks = c(-25, -20, -15, -10, -5, 0, 5, 10, 15, 20, 25,30))+
+  labs(title = "b) Bacteria")+
+  theme(plot.title = element_text(size=17))
+```
+
