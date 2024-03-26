@@ -1,0 +1,163 @@
+---
+title: "Merging_reads"
+author: "Alexa Byers"
+date: "2023-05-23"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+```{r}
+library(phyloseq)
+library(speedyseq)
+library(dada2)
+library(ShortRead)
+library(Biostrings)
+library(tibble)
+library(dplyr)
+source("~/IDClusters_function.R")
+```
+
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+
+#Merge multiple sequencing runs see : https://people.ucsc.edu/~claraqin/process-16s-sequences.html 
+
+#PKS dataset
+#Step 1. merge PKS reads from multiple sequencing runs
+```{r read in PKS ASV RDS files from runs to be merged}
+Auckland_PKS <- readRDS("~/WAuck_PKS_ASV.rds")
+Puketi_PKS <- readRDS("~/Puketi_PKS_ASV.rds")
+```
+#need to ensure sequence lengths are the same across the multiple datasets
+```{r check sequence lengths}
+table(nchar(getSequences(Auckland_PKS)))
+table(nchar(getSequences(Puketi_PKS)))
+```
+```{r merge sequence tables}
+mergetab_PKS <- mergeSequenceTables(Auckland_PKS, Puketi_PKS, tryRC = TRUE)
+```
+#Step 2. merge ASVs into 97% OTUs
+```{r}
+asv_sequences <- colnames(mergetab_PKS)
+sample_names <- rownames(mergetab_PKS)
+dna <- Biostrings::DNAStringSet(asv_sequences)
+
+## Find clusters of ASVs to form the new OTUs
+aln <- DECIPHER::AlignSeqs(dna, processors = 2)
+d <- DECIPHER::DistanceMatrix(aln, processors = 2)
+clusters <- IdClusters(d, method = "complete", cutoff = 0.03, processors = 2) # use `cutoff = 0.03` for a 97% OTU 
+
+## Use dplyr to merge the columns of the seqtab matrix for ASVs in the same OTU
+# prep by adding sequences to the `clusters` data frame
+clusters <- clusters %>%
+  add_column(sequence = asv_sequences)
+PKS_97_seqtab <- mergetab_PKS %>%
+  # setup: turn seqtab into a tibble with rows = ASVs and columns = samples
+  t %>%
+  as_tibble(rownames = "sequence") %>%
+  # add the cluster information
+  left_join(clusters, by = "sequence") %>%
+  # merge ASVs in the same cluster, summing abundances within samples
+  group_by(cluster) %>%
+  summarize_at(vars(-sequence), sum) %>%
+  # Set new taxa names to OTU<cluster #> 
+  mutate(cluster = paste0("OTU_", cluster)) %>%
+  # convert back to a matrix in the original orientation
+  column_to_rownames("cluster") %>%
+  as("matrix") %>%
+  t
+```
+##PKS: merging otu clusters using phyloseq
+```{r make phyloseq object}
+PKS_OTU = otu_table(t(mergetab_PKS), taxa_are_rows = TRUE)
+clusters$cluster <- paste("OTU", clusters$cluster, sep="_") #adding OTU prefix to cluster group
+rownames(clusters) <- rownames(t(mergetab_PKS))
+PKS_taxa = tax_table(as.matrix(clusters))
+
+PKS_ps = phyloseq(PKS_OTU, PKS_taxa) #phyloseq object
+```
+```{r merging ASVs by otu cluster}
+PKS_ps_OTU <- merge_taxa_vec(PKS_ps, clusters$cluster, reorder = FALSE, tax_adjust = 0L)
+```
+##export OTU taxonomy as fasta file
+```{r}
+otu_seqs_PKS <- as.data.frame(tax_table(PKS_ps_OTU)) # giving our seq headers more manageable names (ASV_1, ASV_2...)
+otu_seqs_PKS2 <- otu_seqs_PKS$sequence
+
+otu_headers_PKS <- as.data.frame(otu_seqs_PKS$cluster)
+otu_headers_PKS$`otu_seqs_PKS$cluster` <- paste(">", otu_headers_PKS$`otu_seqs_PKS$cluster`, sep="")
+otu_headers_PKS <- otu_headers_PKS$`otu_seqs_PKS$cluster`
+
+# making and writing out a fasta of our final ASV seqs:
+PKS_OTU_fasta <- c(rbind(otu_headers_PKS, otu_seqs_PKS2))
+write(PKS_OTU_fasta, "~/PKS_OTU_reads.fa")
+```
+#export PKS datasets
+```{r}
+PKS_taxa <- as.data.frame(tax_table(PKS_ps_OTU))
+PKS_otu_counts <- as.data.frame(otu_table(PKS_ps_OTU))
+rownames(PKS_otu_counts) <- PKS_taxa$cluster
+write.csv(PKS_otu_counts, "~/PKS_OTU_counts.csv")
+write.csv(PKS_taxa, "~/PKS_OTU_taxa.csv")
+```
+
+#NRPS dataset
+#Step 1. merge NRPS reads from multiple sequencing runs
+```{r}
+Auckland_NRPS <- readRDS("C:/Users/byersa/OneDrive - Lincoln University/Documents/Rutherford/Data_Analysis/BGC_R_project/DADA2/RDS/WAuck_NRPS_ASV.rds")
+Puketi_NRPS <- readRDS("C:/Users/byersa/OneDrive - Lincoln University/Documents/Rutherford/Data_Analysis/BGC_R_project/DADA2/RDS/Puketi_NRPS_ASV.rds")
+```
+#merge sequence tables
+```{r}
+mergetab_NRPS <- mergeSequenceTables(Auckland_NRPS, Puketi_NRPS, tryRC = TRUE)
+#save merged
+saveRDS(mergetab_NRPS, "C:/Users/byersa/OneDrive - Lincoln University/Documents/Rutherford/Data_Analysis/BGC_R_project/DADA2/RDS/merged_NRPS_ASV.rds")
+
+ncol(Auckland_NRPS)#17497 ASVs
+ncol(Puketi_NRPS)#20479 ASVs
+ncol(mergetab_NRPS)#36635 ASVs
+```
+#Step 2. merge ASVs into 97% OTUs
+```{r}
+asv_sequences_NPRS <- colnames(mergetab_NRPS)
+sample_names_NRPS <- rownames(mergetab_NRPS)
+dna_NRPS <- Biostrings::DNAStringSet(asv_sequences_NPRS)
+
+## Find clusters of ASVs to form the new OTUs
+aln_NPRS <- DECIPHER::AlignSeqs(dna_NRPS, processors = 2)
+d_NRPS <- DECIPHER::DistanceMatrix(aln_NPRS, processors = 2)
+saveRDS(aln_NPRS, "C:/Users/byersa/OneDrive - Lincoln University/Documents/Rutherford/Data_Analysis/BGC_R_project/DADA2/RDS/aln_nrps.rds")
+saveRDS(d_NRPS, "C:/Users/byersa/OneDrive - Lincoln University/Documents/Rutherford/Data_Analysis/BGC_R_project/DADA2/RDS/d_nrps.rds")
+clusters_NRPS <- IdClusters(
+  d_NRPS, 
+  method = "complete",
+  cutoff = 0.03, # use `cutoff = 0.03` for a 97% OTU 
+  processors = 2)
+
+## Use dplyr to merge the columns of the seqtab matrix for ASVs in the same OTU
+# prep by adding sequences to the `clusters` data frame
+clusters_NRPS <- clusters_NRPS %>%
+  add_column(sequence = asv_sequences_NPRS)
+NRPS_97_seqtab <- mergetab_NRPS %>%
+  # setup: turn seqtab into a tibble with rows = ASVs and columns = samples
+  t %>%
+  as_tibble(rownames = "sequence") %>%
+  # add the cluster information
+  left_join(clusters_NRPS, by = "sequence") %>%
+  # merge ASVs in the same cluster, summing abundances within samples
+  group_by(cluster) %>%
+  summarize_at(vars(-sequence), sum) %>%
+  # Set new taxa names to OTU<cluster #> 
+  mutate(cluster = paste0("OTU_", cluster)) %>%
+  # convert back to a matrix in the original orientation
+  column_to_rownames("cluster") %>%
+  as("matrix") %>%
+  t
+```
