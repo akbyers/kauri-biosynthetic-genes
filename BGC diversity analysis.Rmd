@@ -1,0 +1,443 @@
+---
+title: "BGC diversity analysis"
+author: "Alexa Byers"
+date: "2024-03-26"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+###Analysis is split into the major main sections
+###Analysis has been performed separately on the NRPS and PKS gene regions
+#1. Phyloseq import and data preprocessing
+#2. Alpha diversity analysis
+#3. Beta diversity analysis
+#4. Plotting taxonomic composition of dominant taxonomic groups
+#5. ANCOM-BC2 analysis
+
+#load libraries
+```{r}
+library(car)
+library(ggplot2)
+library(phyloseq)
+library(vegan)
+library(metagenomeSeq)
+library(metagMisc)
+library(tidyverse)
+library(ANCOMBC)
+library(Rmisc)
+library(reshape2)
+library(lme4)
+library(ggpubr)
+library(data.table)
+library(devtools)
+library(pairwiseAdonis)
+library(Biostrings)
+library(dplyr)
+library(ggordiplots)
+```
+
+###### NRPS GENE REGIONS ######
+#1. Phyloseq import and data preprocessing
+```{r NRPS data import}
+NRPS_counts <- read.csv("~/NRPS_OTUs_filtered.csv")
+NRPS_sample_data <- read.csv("~/NRPS_sample_METADATA.csv")
+NRPS_taxa <- read.csv("~/NRPS_blastx_ps_edit.csv")
+```
+```{r format data}
+rownames(NRPS_counts) <- NRPS_counts$BGC_ID
+NRPS_counts <- NRPS_counts[,-1]
+rownames(NRPS_taxa) <- NRPS_taxa$BGC_ID
+NRPS_taxa <- NRPS_taxa[,-1]
+rownames(NRPS_sample_data) <- NRPS_sample_data$SequenceID
+factors <- c(4:7)
+NRPS_sample_data[,factors] <- lapply(NRPS_sample_data[,factors] , factor)  #set as factors
+```
+```{r make NRPS phyloseq object}
+NRPS_OTU = otu_table(NRPS_counts, taxa_are_rows = TRUE)
+NRPS_sampleDat = sample_data(NRPS_sample_data)
+NRPS_tax_table <- tax_table(as.matrix(NRPS_taxa))
+#make phyloseq oject
+NRPS_ps = phyloseq(NRPS_OTU, NRPS_sampleDat, NRPS_tax_table)
+```
+```{r filter taxa with < 10 reads}
+NRPS_ps_filt = filter_taxa(NRPS_ps, function(x) sum(x) > 10, TRUE)
+saveRDS(NRPS_ps_filt, "~/NRPS_ps_filt.rds")
+```
+```{r rarefy ps object}
+View(as.data.frame(sample_sums(NRPS_ps_filt)))
+NRPS_ps_rareAvg <- rarefy_even_depth(NRPS_ps_filt, sample.size = 4000, replace = FALSE, trimOTUs = TRUE, rngseed = 71) #6713 taxa
+saveRDS(NRPS_ps_rareAvg, "~/NRPS_ps_rareAvg.rds")
+```
+#2. Alpha diversity analysis
+```{r calculate alpha diversity}
+NRPS_richness <- specnumber(t(otu_table(NRPS_ps_rareAvg)))
+NRPS_shannondiv <- diversity(t(otu_table(NRPS_ps_rareAvg)))
+
+NRPS_alpha <- cbind(as.data.frame(NRPS_richness), as.data.frame(NRPS_shannondiv))
+NRPS_alpha <- cbind(NRPS_alpha, as.data.frame(NRPS_ps_rareAvg@sam_data)) #add sample data
+```
+```{r plot alpha diversity: format data}
+NRPS_alpha.m <- melt(NRPS_alpha[c(1:3, 5,7,8)])
+NRPS_alpha.SE <- summarySE(NRPS_alpha.m, measurevar = "value", groupvars =c("Forest", "PTA_symptomatic","variable"))
+NRPS_alpha.SE2 <- summarySE(NRPS_alpha.m, measurevar = "value", groupvars =c("Forest", "variable"))
+levels(NRPS_alpha.SE$variable) <- c("Chao1 richness", "Shannon diversity")
+levels(NRPS_alpha.SE2$variable) <- c("Chao1 richness", "Shannon diversity")
+```
+```{r NRPS alpha diversity plots}
+NRPS_diversity_plot_1 <- ggplot(data=NRPS_alpha.SE, aes(y=Forest, x=value, group=PTA_symptomatic, color=PTA_symptomatic)) +
+  geom_point(aes(), size=6)+
+  theme_bw(base_size = 15)+
+  xlab("")+
+  ylab("")+ 
+  theme(axis.text.x = element_text(face="bold"),
+  axis.text.y = element_text(face="bold"),
+  axis.title.x = element_text(face="bold"),
+  axis.title.y = element_text(face="bold"))+
+  geom_errorbar(aes(xmin=value-se, xmax=value+se), size=1, width=.2)+  
+    scale_color_manual(values = c("blue", "red"), labels=c("Non-symptomatic", "Symptomatic"))+
+  facet_wrap(~variable, scales = "free_x", nrow = 1, ncol = 2)+
+  labs(title = "a) NRPS BGCs", color="Disease expression")
+```
+#glmer tests on alpha diversity
+```{r run glmer tests using forest as main effect}
+NRPS_shannon <- glmer(shannondiv_NRPS ~ Forest + (1|PTA_symptomatic), family= Gamma(link = "log"), data = NRPS_alpha)
+Anova(NRPS_shannon)
+
+NRPS_richness <- glmer(richness_NRPS ~ Forest + (1|PTA_symptomatic), family= Gamma(link = "log"), data = NRPS_alpha)
+Anova(NRPS_richness)
+```
+```{r run glmer tests using disease expression as main effect}
+NRPS_alpha_noPuk <- subset(NRPS_alpha, Forest!="Puketi")#remove puketi forest for tests of PTA symptomology
+NRPS_shannon2 <- glmer(shannondiv_NRPS ~ PTA_symptomatic + (1|Forest), family= Gamma(link = "log"), data = NRPS_alpha_noPuk)
+Anova(NRPS_shannon2)
+
+NRPS_richness2 <- glmer(richness_NRPS ~ PTA_symptomatic + (1|Forest), family= Gamma(link = "log"), data = NRPS_alpha_noPuk)
+Anova(NRPS_richness2)
+```
+```{r pairwise wilcoxon tests}
+pairwise.wilcox.test(NRPS_alpha$richness_NRPS, NRPS_alpha$Forest, p.adjust.method = "holm")
+pairwise.wilcox.test(NRPS_alpha$shannondiv_NRPS, NRPS_alpha$Forest, p.adjust.method = "holm")
+```
+#3. Beta diversity analysis
+```{r distance matrix and NMDS}
+NRPS_BC <- phyloseq::distance(NRPS_ps_rareAvg, "bray")
+NRPS_NMDS <- metaMDS(as.matrix(NRPS_BC), distance = "bray")
+```
+```{r NRPS beta diversity PERMANOVA and pairwise adonis}
+NRPS_filt_sampleDat <- as.matrix(NRPS_ps_rareAvg@sam_data)
+NRPS_filt_sampleDat <- as.data.frame(NRPS_filt_sampleDat)
+
+adonis2(NRPS_BC ~ NRPS_filt_sampleDat$Forest) #permanova tests in vegan
+pairwise.adonis(NRPS_BC, NRPS_filt_sampleDat$Forest, sim.function = "vegdist", sim.method = "bray", p.adjust.m = "holm", perm = 999) #pairwise adonis tests
+```
+```{r plotting ordination by forest}
+ordiplot_NRPS <- gg_ordiplot(NRPS_nmds_forest, NRPS_NMDS_sampleDat$Forest, scaling = 1, choices = c(1, 2), kind = c("sd"),
+    conf = 0.95, show.groups = "all", ellipse = TRUE, label = FALSE, hull = FALSE,
+    spiders = FALSE, plot = TRUE)
+ordiplot_NRPS2 <- ordiplot_NRPS$plot +  
+  scale_colour_manual(values=c("darkgreen","black", "blue", "orange", "purple")) +
+  guides(color=guide_legend("Forest"))+
+  geom_vline(xintercept = c(0), color = "black", linetype = 2) +
+  geom_hline(yintercept = c(0), color = "black", linetype = 2)+
+  theme_bw(base_size=15)+
+  labs(title = "a) NRPS BGCs")
+```
+###removing puketi forest to test effects of pta symptomology
+```{r}
+NRPS_ps_filt2 <- subset_samples(NRPS_ps_rareAvg, Forest != "Puketi") #remove puketi
+NRPS_ps_filt2 = filter_taxa(NRPS_ps_filt2, function(x) sum(x) > 1, TRUE) #remove otus which now have a zero count
+NRPS_ps_rareAvg2 <- rarefy_even_depth(NRPS_ps_filt2, sample.size = 3900, replace = FALSE, trimOTUs = TRUE, rngseed = 71) #3924 taxa
+```
+```{r beta diversity on no puketi dataset}
+NRPS_BC2 <- phyloseq::distance(NRPS_ps_rareAvg2, "bray")
+NRPS_NMDS2 <- metaMDS(as.matrix(NRPS_BC2), distance = "bray")
+```
+```{r NRPS beta diversity PERMANOVA and pairwise adonis}
+NRPS_filt_sampleDat2 <- as.data.frame(NRPS_ps_rareAvg2@sam_data)
+adonis2(NRPS_BC2 ~ NRPS_filt_sampleDat2$PTA_symptomatic)
+```
+```{r plotting ordination by dieback expression}
+ordiplot_NRPS_PTA <- gg_ordiplot(NRPS_nmds_PTA, NRPS_sampleDat_PTA$PTA_symptomatic, scaling = 1, choices = c(1, 2), kind = c("sd"),
+    conf = 0.95, show.groups = "all", ellipse = TRUE, label = FALSE, hull = FALSE,
+    spiders = FALSE, plot = TRUE)
+ordiplot_NRPS_PTA2 <- ordiplot_NRPS_PTA$plot +  
+  scale_colour_manual(values=c("blue", "red")) +
+  guides(color=guide_legend("Dieback expression"))+
+  geom_vline(xintercept = c(0), color = "black", linetype = 2) +
+  geom_hline(yintercept = c(0), color = "black", linetype = 2)+
+  theme_bw(base_size=15)+
+  labs(title = "a) NRPS BGCs")
+```
+#4. Plotting most abundant NRPS gene regions
+```{r}
+NRPS_Glom <- filter_taxa(NRPS_RF_Forest, function(x) mean(x) > 0.5, TRUE)
+```
+```{r}
+NRPS_Glom.df <- psmelt(NRPS_Glom) #melt phyloseq object
+
+NRPS_Glom.sum <- NRPS_Glom.df %>%
+  group_by(Forest, OTU) %>%
+  summarize(mean_abund = mean(Abundance, na.rm=FALSE)) #calculate mean abundance of each BGC per forest
+
+colourCount = length(unique(NRPS_Glom.sum$OTU))
+mycolors2 = c(brewer.pal(name="Paired", n = 12), brewer.pal(name="Set2", n = 4), brewer.pal(name="Dark2", n = 8)) #set colour palette
+```
+```{r}
+NRPS_Glom_plot <- ggplot(NRPS_Glom.sum, aes(fill=reorder(OTU, +mean_abund), y=mean_abund, x=Forest)) + 
+    geom_bar(position="stack", stat="identity")+
+  theme_bw(base_size = 13)+ 
+  theme(axis.text.x = element_text(face="bold"),
+  axis.text.y = element_text(face="bold"),
+  axis.title.x = element_text(face="bold"),
+  axis.title.y = element_text(face="bold"))+
+  xlab("")+
+  ylab("Relative abundance (%)")+
+  geom_col(color = "black")+ 
+  guides(fill=guide_legend(title="BGC_ID", ncol = 2))+ 
+  scale_fill_manual(values = mycolors2)+
+  labs(title = "b) NRPS BGCs")+
+  theme(plot.title = element_text(size=15))
+```
+#5. ANCOM-BC2 analysis
+```{r format phyloseq objects and filter low abundance taxa}
+ps_NRPS2 = filter_taxa(ps_NRPS, function(x) sum(x) > 100, TRUE) #1856 taxa
+NRPS_DA_PTA <- subset_samples(ps_NRPS, Forest != "Puketi") #remove puketi- for dieback expression model
+NRPS_DA_PTA = filter_taxa(NRPS_DA_PTA, function(x) sum(x) > 100, TRUE) #920 taxa
+```
+```{r ancombc model by Forest}
+NRPS_ancombc_Forest <- ancombc2(ps_NRPS2, fix_formula = "Forest", p_adj_method = "holm",  prv_cut = 0.01, lib_cut = 0,  s0_perc = 0.05, 
+  group = "Forest", struc_zero = TRUE, neg_lb = FALSE,  alpha = 0.05, n_cl = 1, verbose = TRUE, global = TRUE, pairwise = TRUE,
+  iter_control= list(tol= 0.01, max_iter= 20, verbose= FALSE), em_control= list(tol= 1e-05, max_iter= 100), mdfdr_control= list(fwer_ctrl_method= "holm", B= 100))
+```
+```{r ancombc model by PTA expression}
+NRPS_ancombc_PTA <- ancombc2(NRPS_DA_PTA, fix_formula = "PTA_symptomatic", p_adj_method = "holm", prv_cut = 0.01, lib_cut = 0, s0_perc = 0.05, 
+  group = "PTA_symptomatic",  struc_zero = TRUE, neg_lb = FALSE, alpha = 0.05, n_cl = 1, verbose = TRUE, global = FALSE, pairwise = FALSE, 
+  iter_control = list(tol = 0.01, max_iter = 20, verbose = FALSE), em_control = list(tol = 1e-05, max_iter = 100))
+```
+```{r filter non-significant ANCOM-BC2 results}
+NRPS_ancom_Forest_global <- subset(NRPS_ancombc_Forest$res_global, q_val < 0.05) #shows NRPS BGCs with significant differential abundance
+NRPS_ancombc_PTA_global <- subset(NRPS_ancombc_PTA$res, q_PTA_symptomaticTRUE < 0.05)
+```
+#log fold change plots BGC regions between non-symp and symp
+```{r}
+PTA_LFC_NRPS <- ggplot(data=NRPS_ancombc_PTA_global, aes(y=reorder(taxon, -W_PTA_symptomaticTRUE), x=W_PTA_symptomaticTRUE)) + #using W value
+  geom_point(size=5, color=NRPS_ancombc_PTA_global$colour)+
+  theme_bw(base_size = 12)+
+  xlab("ANCOM BC2 W-value\nNon-symptomatic vs Symptomatic")+
+  ylab("")+ 
+  theme(axis.text.x = element_text(face="bold"),
+  axis.text.y = element_text(face="bold"))+ 
+  labs(fill="Relative abundance (%)")+ 
+  geom_vline(xintercept=0, color="black", linewidth=1)+
+  scale_x_continuous(limits = c(-25, 30), breaks = c(-25, -20, -15, -10, -5, 0, 5, 10, 15, 20, 25,30))+
+  labs(title = "a) NRPS BGCs")+
+  theme(plot.title = element_text(size=17))
+```
+
+##### PKS GENE REGIONS ######
+#1. Phyloseq import and data preprocessing
+```{r PKS data import}
+PKS_counts <- read.csv("~/PKS_OTUs_filtered.csv")
+PKS_sample_data <- read.csv("~/PKS_sample_METADATA.csv")
+PKS_taxa <- read.csv("~/PKS_blastx_ps_edit.csv")
+```
+```{r format data}
+rownames(PKS_counts) <- PKS_counts$BGC_ID
+PKS_counts <- PKS_counts[,-1]
+rownames(PKS_taxa) <- PKS_taxa$BGC_ID
+PKS_taxa <- PKS_taxa[,-1]
+rownames(PKS_sample_data) <- PKS_sample_data$SequenceID
+factors <- c(4:7)
+PKS_sample_data[,factors] <- lapply(PKS_sample_data[,factors] , factor)  #set as factors
+```
+```{r make PKS phyloseq object}
+PKS_OTU = otu_table(PKS_counts, taxa_are_rows = TRUE)
+PKS_sampleDat = sample_data(PKS_sample_data)
+PKS_tax_table <- tax_table(as.matrix(PKS_taxa))
+#make phyloseq oject
+PKS_ps = phyloseq(PKS_OTU, PKS_sampleDat, PKS_tax_table)
+```
+```{r filter taxa with < 10 reads}
+PKS_ps_filt = filter_taxa(PKS_ps, function(x) sum(x) > 10, TRUE)
+saveRDS(PKS_ps_filt, "~/PKS_ps_filt.rds")
+```
+```{r rarefy ps object}
+View(as.data.frame(sample_sums(PKS_ps_filt)))
+PKS_ps_rareAvg <- rarefy_even_depth(PKS_ps_filt, sample.size = 2000, replace = FALSE, trimOTUs = TRUE, rngseed = 71) #6713 taxa
+saveRDS(PKS_ps_rareAvg, "~/PKS_ps_rareAvg.rds")
+```
+#2. Alpha diversity analysis
+```{r calculate alpha diversity}
+PKS_richness <- specnumber(t(otu_table(PKS_ps_rareAvg)))
+PKS_shannondiv <- diversity(t(otu_table(PKS_ps_rareAvg)))
+
+PKS_alpha <- cbind(as.data.frame(PKS_richness), as.data.frame(PKS_shannondiv))
+PKS_alpha <- cbind(PKS_alpha, as.data.frame(PKS_ps_rareAvg@sam_data)) #add sample data
+```
+```{r plot alpha diversity: format data}
+PKS_alpha.m <- melt(PKS_alpha[c(1:3, 5,7,8)])
+PKS_alpha.SE <- summarySE(PKS_alpha.m, measurevar = "value", groupvars =c("Forest", "PTA_symptomatic","variable"))
+PKS_alpha.SE2 <- summarySE(PKS_alpha.m, measurevar = "value", groupvars =c("Forest", "variable"))
+levels(PKS_alpha.SE$variable) <- c("Chao1 richness", "Shannon diversity")
+levels(PKS_alpha.SE2$variable) <- c("Chao1 richness", "Shannon diversity")
+```
+```{r PKS alpha diversity plots}
+PKS_diversity_plot_1 <- ggplot(data=PKS_alpha.SE, aes(y=Forest, x=value, group=PTA_symptomatic, color=PTA_symptomatic)) +
+  geom_point(aes(), size=6)+
+  theme_bw(base_size = 15)+
+  xlab("")+
+  ylab("")+ 
+  theme(axis.text.x = element_text(face="bold"),
+  axis.text.y = element_text(face="bold"),
+  axis.title.x = element_text(face="bold"),
+  axis.title.y = element_text(face="bold"))+
+  geom_errorbar(aes(xmin=value-se, xmax=value+se), size=1, width=.2)+  
+    scale_color_manual(values = c("blue", "red"), labels=c("Non-symptomatic", "Symptomatic"))+
+  facet_wrap(~variable, scales = "free_x", nrow = 1, ncol = 2)+
+  labs(title = "a) PKS BGCs", color="Disease expression")
+```
+#glmer tests on alpha diversity
+```{r run glmer tests using forest as main effect}
+PKS_shannon <- glmer(shannondiv_PKS ~ Forest + (1|PTA_symptomatic), family= Gamma(link = "log"), data = PKS_alpha)
+Anova(PKS_shannon)
+
+PKS_richness <- glmer(richness_PKS ~ Forest + (1|PTA_symptomatic), family= Gamma(link = "log"), data = PKS_alpha)
+Anova(PKS_richness)
+```
+```{r run glmer tests using disease expression as main effect}
+PKS_alpha_noPuk <- subset(PKS_alpha, Forest!="Puketi")#remove puketi forest for tests of PTA symptomology
+PKS_shannon2 <- glmer(shannondiv_PKS ~ PTA_symptomatic + (1|Forest), family= Gamma(link = "log"), data = PKS_alpha_noPuk)
+Anova(PKS_shannon2)
+
+PKS_richness2 <- glmer(richness_PKS ~ PTA_symptomatic + (1|Forest), family= Gamma(link = "log"), data = PKS_alpha_noPuk)
+Anova(PKS_richness2)
+```
+```{r pairwise wilcoxon tests}
+pairwise.wilcox.test(PKS_alpha$richness_PKS, PKS_alpha$Forest, p.adjust.method = "holm")
+pairwise.wilcox.test(PKS_alpha$shannondiv_PKS, PKS_alpha$Forest, p.adjust.method = "holm")
+```
+#3. Beta diversity analysis
+```{r distance matrix and NMDS}
+PKS_BC <- phyloseq::distance(PKS_ps_rareAvg, "bray")
+PKS_NMDS <- metaMDS(as.matrix(PKS_BC), distance = "bray")
+```
+```{r PKS beta diversity PERMANOVA and pairwise adonis}
+PKS_filt_sampleDat <- as.matrix(PKS_ps_rareAvg@sam_data)
+PKS_filt_sampleDat <- as.data.frame(PKS_filt_sampleDat)
+
+adonis2(PKS_BC ~ PKS_filt_sampleDat$Forest) #permanova tests in vegan
+pairwise.adonis(PKS_BC, PKS_filt_sampleDat$Forest, sim.function = "vegdist", sim.method = "bray", p.adjust.m = "holm", perm = 999) #pairwise adonis tests
+```
+```{r plotting ordination by forest}
+ordiplot_PKS <- gg_ordiplot(PKS_nmds_forest, PKS_NMDS_sampleDat$Forest, scaling = 1, choices = c(1, 2), kind = c("sd"),
+    conf = 0.95, show.groups = "all", ellipse = TRUE, label = FALSE, hull = FALSE,
+    spiders = FALSE, plot = TRUE)
+ordiplot_PKS2 <- ordiplot_PKS$plot +  
+  scale_colour_manual(values=c("darkgreen","black", "blue", "orange", "purple")) +
+  guides(color=guide_legend("Forest"))+
+  geom_vline(xintercept = c(0), color = "black", linetype = 2) +
+  geom_hline(yintercept = c(0), color = "black", linetype = 2)+
+  theme_bw(base_size=15)+
+  labs(title = "b) PKS BGCs")
+```
+###removing puketi forest to test effects of pta symptomology
+```{r}
+PKS_ps_filt2 <- subset_samples(PKS_ps_rareAvg, Forest != "Puketi") #remove puketi
+PKS_ps_filt2 = filter_taxa(PKS_ps_filt2, function(x) sum(x) > 1, TRUE) #remove otus which now have a zero count
+PKS_ps_rareAvg2 <- rarefy_even_depth(PKS_ps_filt2, sample.size = 3900, replace = FALSE, trimOTUs = TRUE, rngseed = 71) #3924 taxa
+```
+```{r beta diversity on no puketi dataset}
+PKS_BC2 <- phyloseq::distance(PKS_ps_rareAvg2, "bray")
+PKS_NMDS2 <- metaMDS(as.matrix(PKS_BC2), distance = "bray")
+```
+```{r PKS beta diversity PERMANOVA and pairwise adonis}
+PKS_filt_sampleDat2 <- as.data.frame(PKS_ps_rareAvg2@sam_data)
+adonis2(PKS_BC2 ~ PKS_filt_sampleDat2$PTA_symptomatic)
+```
+```{r plotting ordination by dieback expression}
+ordiplot_PKS_PTA <- gg_ordiplot(PKS_nmds_PTA, PKS_sampleDat_PTA$PTA_symptomatic, scaling = 1, choices = c(1, 2), kind = c("sd"),
+    conf = 0.95, show.groups = "all", ellipse = TRUE, label = FALSE, hull = FALSE,
+    spiders = FALSE, plot = TRUE)
+ordiplot_PKS_PTA2 <- ordiplot_PKS_PTA$plot +  
+  scale_colour_manual(values=c("blue", "red")) +
+  guides(color=guide_legend("Dieback expression"))+
+  geom_vline(xintercept = c(0), color = "black", linetype = 2) +
+  geom_hline(yintercept = c(0), color = "black", linetype = 2)+
+  theme_bw(base_size=15)+
+  labs(title = "b) PKS BGCs")
+```
+#4. Plotting most abundant PKS gene regions
+```{r}
+PKS_Glom <- filter_taxa(PKS_RF_Forest, function(x) mean(x) > 0.3, TRUE)
+```
+```{r}
+PKS_Glom.df <- psmelt(PKS_Glom) #melt phyloseq object
+
+PKS_Glom.sum <- PKS_Glom.df %>%
+  group_by(Forest, OTU) %>%
+  summarize(mean_abund = mean(Abundance, na.rm=FALSE)) #calculate mean abundance of each BGC per forest
+
+colourCount = length(unique(PKS_Glom.sum$OTU))
+mycolors2 = c(brewer.pal(name="Paired", n = 12), brewer.pal(name="Set2", n = 4), brewer.pal(name="Dark2", n = 8)) #set colour palette
+```
+```{r}
+PKS_Glom_plot <- ggplot(PKS_Glom.sum, aes(fill=reorder(OTU, +mean_abund), y=mean_abund, x=Forest)) + 
+    geom_bar(position="stack", stat="identity")+
+  theme_bw(base_size = 13)+ 
+  theme(axis.text.x = element_text(face="bold"),
+  axis.text.y = element_text(face="bold"),
+  axis.title.x = element_text(face="bold"),
+  axis.title.y = element_text(face="bold"))+
+  xlab("")+
+  ylab("Relative abundance (%)")+
+  geom_col(color = "black")+ 
+  guides(fill=guide_legend(title="BGC_ID", ncol = 2))+ 
+  scale_fill_manual(values = mycolors2)+
+  labs(title = "b) PKS BGCs")+
+  theme(plot.title = element_text(size=15))
+```
+#5. ANCOM-BC2 analysis
+```{r format phyloseq objects and filter low abundance taxa}
+ps_PKS2 = filter_taxa(ps_PKS, function(x) sum(x) > 100, TRUE) #1856 taxa
+PKS_DA_PTA <- subset_samples(ps_PKS, Forest != "Puketi") #remove puketi- for dieback expression model
+PKS_DA_PTA = filter_taxa(PKS_DA_PTA, function(x) sum(x) > 100, TRUE) #920 taxa
+```
+```{r ancombc model by Forest}
+PKS_ancombc_Forest <- ancombc2(ps_PKS2, fix_formula = "Forest", p_adj_method = "holm", prv_cut = 0.01, lib_cut = 0, s0_perc = 0.05,
+  group = "Forest", struc_zero = TRUE, neg_lb = FALSE, alpha = 0.05, n_cl = 1, verbose = TRUE, global = TRUE, pairwise = TRUE, 
+  iter_control = list(tol = 0.01, max_iter = 20, verbose = FALSE), em_control = list(tol = 1e-05, max_iter = 100),
+  mdfdr_control = list(fwer_ctrl_method = "holm", B = 100))
+```
+```{r filter non-significant ANCOM-BC2 results}
+PKS_ancom_Forest_global <- subset(PKS_ancombc_Forest$res_global, q_val < 0.05) #shows PKS BGCs with significant differential abundance
+PKS_ancombc_PTA_global <- subset(PKS_ancombc_PTA$res, q_PTA_symptomaticTRUE < 0.05)
+```
+```{r ancombc model by PTA expression}
+PKS_ancombc_PTA <- ancombc2(PKS_DA_PTA, fix_formula = "PTA_symptomatic", p_adj_method = "holm", prv_cut = 0.01,
+  lib_cut = 0, s0_perc = 0.05, group = "PTA_symptomatic", struc_zero = TRUE, neg_lb = FALSE, alpha = 0.05, n_cl = 1,
+  verbose = TRUE, global = FALSE, pairwise = FALSE, iter_control = list(tol = 0.01, max_iter = 20, verbose = FALSE), em_control = list(tol = 1e-05, max_iter = 100))
+```
+#log fold change plots BGC regions between non-symp and symp
+```{r}
+PTA_LFC_PKS <- ggplot(data=PKS_ancombc_PTA_global, aes(y=reorder(taxon, -W_PTA_symptomaticTRUE), x=W_PTA_symptomaticTRUE)) + #using W value
+  geom_point(size=5, color=PKS_ancombc_PTA_global$colour)+
+  theme_bw(base_size = 12)+
+  xlab("ANCOM BC2 W-value\nNon-symptomatic vs Symptomatic")+
+  ylab("")+ 
+  theme(axis.text.x = element_text(face="bold"),
+  axis.text.y = element_text(face="bold"))+ 
+  labs(fill="Relative abundance (%)")+ 
+  geom_vline(xintercept=0, color="black", linewidth=1)+
+  scale_x_continuous(limits = c(-25, 30), breaks = c(-25, -20, -15, -10, -5, 0, 5, 10, 15, 20, 25,30))+
+  labs(title = "a) PKS BGCs")+
+  theme(plot.title = element_text(size=17))
+```
