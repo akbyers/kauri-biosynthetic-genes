@@ -23,17 +23,7 @@ library(dplyr)
 source("~/IDClusters_function.R")
 ```
 
-
-## R Markdown
-
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
-
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
-
-
 #Merge multiple sequencing runs see : https://people.ucsc.edu/~claraqin/process-16s-sequences.html 
-
-#PKS dataset
 #Step 1. merge PKS reads from multiple sequencing runs
 ```{r read in PKS ASV RDS files from runs to be merged}
 Auckland_PKS <- readRDS("~/WAuck_PKS_ASV.rds")
@@ -112,21 +102,14 @@ write.csv(PKS_otu_counts, "~/PKS_OTU_counts.csv")
 write.csv(PKS_taxa, "~/PKS_OTU_taxa.csv")
 ```
 
-#NRPS dataset
 #Step 1. merge NRPS reads from multiple sequencing runs
 ```{r}
-Auckland_NRPS <- readRDS("C:/Users/byersa/OneDrive - Lincoln University/Documents/Rutherford/Data_Analysis/BGC_R_project/DADA2/RDS/WAuck_NRPS_ASV.rds")
-Puketi_NRPS <- readRDS("C:/Users/byersa/OneDrive - Lincoln University/Documents/Rutherford/Data_Analysis/BGC_R_project/DADA2/RDS/Puketi_NRPS_ASV.rds")
+Auckland_NRPS <- readRDS("~/WAuck_NRPS_ASV.rds")
+Puketi_NRPS <- readRDS("~/Puketi_NRPS_ASV.rds")
 ```
 #merge sequence tables
 ```{r}
 mergetab_NRPS <- mergeSequenceTables(Auckland_NRPS, Puketi_NRPS, tryRC = TRUE)
-#save merged
-saveRDS(mergetab_NRPS, "C:/Users/byersa/OneDrive - Lincoln University/Documents/Rutherford/Data_Analysis/BGC_R_project/DADA2/RDS/merged_NRPS_ASV.rds")
-
-ncol(Auckland_NRPS)#17497 ASVs
-ncol(Puketi_NRPS)#20479 ASVs
-ncol(mergetab_NRPS)#36635 ASVs
 ```
 #Step 2. merge ASVs into 97% OTUs
 ```{r}
